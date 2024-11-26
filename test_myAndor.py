@@ -8,12 +8,14 @@ Build a class
 Change this to get image
 Watch out buffers!
 ready: setup cam
+https://pylablib.readthedocs.io/en/stable/devices/cameras_basics.html#cameras-basics
 """
 from datetime import datetime
 from pylablib.devices import Andor
 import numpy as np
 import ctypes as ct
 import time
+import matplotlib.pyplot as plt
 # def setup_camera(andor): #OJO! Armar una clase
 #     shape = (512, 512) # TO DO: change to 256 x 256
 #     expTime = 0.300   # in sec
@@ -72,13 +74,13 @@ if __name__=="__main__":
     Andor.AndorSDK2.restart_lib() #restart_lib is not imported in __init__.py
     # print(Andor.get_cameras_number_SDK2()) #This is because of the __init__.py script of Andor file
     andor = Andor.AndorSDK2Camera(idx=0, temperature = -30, fan_mode = "full")
-    print(datetime.now(),'[test_andor_using_pylablib] Device info:', andor.get_device_info())
+    print(datetime.now(),'[test_myAndor] Device info:', andor.get_device_info())
     #setup_camera(andor)
-    print("Andor is opened?", andor.is_opened())
+    print("Is Andor opened?", andor.is_opened()) #El constructor llamó a open al instanciarse el objeto
     print("Andor cooler ON?", andor.is_cooler_on())
-    print('status: ',andor.get_status(), "idle:no acquisition")
-    print("Andor temperature:", andor.get_temperature())
-    print("Andor temperature: status", andor.get_temperature_status())
+    print('status: ',andor.get_status(), ", idle: no acquisition")
+    print("Andor current temperature:", andor.get_temperature())
+    print("Andor temperature status: ", andor.get_temperature_status(), ", off: cooler off")
     print("Temperature setpoint: ", andor.get_temperature_setpoint())
     print('px_size:', andor.get_pixel_size())
     print("andor channel: ", andor.get_channel())
@@ -95,32 +97,61 @@ if __name__=="__main__":
     print("emCCD gain: ", andor.get_EMCCD_gain())
     print("get_roi: ", andor.get_roi()) #512*512
     #shutters
-    print("shutter parameters: ", andor.get_shutter_parameters())
-    print("shutter: ", andor.get_shutter())
+    print("Shutter parameters: ", andor.get_shutter_parameters())
+    print("Shutter status: ", andor.get_shutter())
     #Trigger
     #print("Trigger mode: ", andor.get_trigger_mode()) #Should be internal. Yes: int
     print("Acq mode: ", andor.get_acquisition_mode()) #should be kinetic, or use andor.setup_kinetic_mode()
 
     #Desde aquí modificar el script
-    andor.setup_acquisition(mode="cont", nframes=10)
-    print("Acq mode before change: ", andor.get_acquisition_mode())
+    # andor.setup_acquisition(mode="cont", nframes=10)
+    # print("Acq mode before change: ", andor.get_acquisition_mode())
     print("Tamaño del buffer: ", andor.get_buffer_size())
-    open_shutter(andor,1)
-    print("shutter: ", andor.get_shutter())
-    andor.start_acquisition()
-    print('status2: ',andor.get_status(), "idle: no acquisition")
-    data = andor._read_frames((0, 10),False)
-    print("FRames acquires: ", andor._get_acquired_frames())
-    # print("data: ", data.shape)
-    time.sleep(10.)
-    print('status3: ',andor.get_status(), "idle:no acquisition")
-    andor.clear_acquisition()
-    print('status4: ',andor.get_status(), "idle:no acquisition")
-    open_shutter(andor,0)
-    print("shutter: ", andor.get_shutter())
-    andor.stop_acquisition()
-    print('status5: ',andor.get_status(), "idle:no acquisition")
-    andor.close()
-    print("Andor is opened?", andor.is_opened())
+    expTime = 0.050   # in sec
+            
+    andor.set_exposure(expTime)
+    
+    ########################
+    #take_snap:
+    try:
+        # open_shutter(andor,1) #No need to use shutter since I have no shutter
+        # print("shutter: ", andor.get_shutter())
+        print(andor.get_frame_timings())
+        data = andor.snap() # start_acquisition and stop_acquisition are executed inside
+        print('status2: ',andor.get_status(), ", idle: no acquisition")
+        data = np.array(data)
+        # data = data[0,:, :] #If I use andor.grab(1):shape(1,512,512)
+        print(data.shape)
+        plt.figure()
+        plt.imshow(data)
+        print('status3: ',andor.get_status(), "idle:no acquisition")
+    finally:
+        andor.stop_acquisition() #This is not necessary, I leave it here in case something fails.
+        print('status4: ',andor.get_status(), "idle:no acquisition")
+        # open_shutter(andor,0)
+        # print("shutter: ", andor.get_shutter())
+        andor.close()
+        print("Is Andor opened?", andor.is_opened())
+    time.sleep(10.0)
+#%% Cotinuous Acquisition
+    andor = Andor.AndorSDK2Camera(idx=0, temperature = -30, fan_mode = "full")
+    print(datetime.now(),'[test_myAndor] Device info:', andor.get_device_info())
+    #setup_camera(andor)
+    print("Is Andor opened?", andor.is_opened()) 
+    i=0
+    try:
+        # nframes=100 relates to the size of the frame buffer; the acquisition will continue indefinitely
+        # andor.setup_acquisition(mode="sequence", nframes=100)  # could be combined with start_acquisition, or kept separate
+        andor.start_acquisition()
+        while i<10:  # acquisition loop
+            andor.wait_for_frame()  # wait for the next available frame
+            data = andor.read_newest_image()  # get the oldest image which hasn't been read yet
+            print(data.shape)
+            plt.figure()
+            plt.imshow(data)
+            i+=1
 
-
+        andor.stop_acquisition()
+    finally:
+        andor.close()
+        print("Is Andor opened?", andor.is_opened())

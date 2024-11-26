@@ -244,8 +244,6 @@ class AndorSDK2Camera(camera.IBinROICamera, camera.IExposureCamera):
         """Open connection to the camera"""
         if self.handle is None:
             ncams=get_cameras_number()
-            print("Number of cams available: ", ncams)
-            print("idx: ", self.idx)
             if self.idx>=ncams:
                 raise AndorError("camera index {} is not available ({} cameras exist)".format(self.idx,ncams))
             self.handle=lib.GetCameraHandle(self.idx)
@@ -1081,13 +1079,10 @@ class AndorSDK2Camera(camera.IBinROICamera, camera.IExposureCamera):
         Always return tuple ``(frames, infos)``; if ``return_info==False``, ``infos`` value is ignored, so it can be anything (e.g., ``None``).
         """
         dim=self._get_data_dimensions_rc()
-        print("dim: ", dim)
         dt=np.dtype(self._default_image_dtype)
-        print('dt: ', dt)
         get_method=lib.GetImages16 if dt.itemsize<=2 else lib.GetImages
         data,_,_=get_method(rng[0]+1,rng[1],dim[0]*dim[1]*(rng[1]-rng[0]))
         data=self._convert_indexing(data.reshape((-1,dim[0],dim[1])),"rcb",axes=(1,2))
-        print("type(data) in read frames", type(data))
         return list(data),None
 
     def _get_grab_acquisition_parameters(self, nframes, buff_size):

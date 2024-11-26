@@ -500,12 +500,12 @@ class Backend(QtCore.QObject):
         
         #self.pxSize = 80  # in nm #moved infront of Frontend to allow access
         self.shape = (512, 512) # TO DO: change to 256 x 256
-        self.expTime = 0.300   # in sec
+        self.expTime = 0.050   # in sec
         
         self.andor.set_exposure(self.expTime)
-        self.andor.set_roi(0, 512, 0, 512, 1, 1)
+        self.andor.set_roi(0, 512, 0, 512, 1, 1) #This one could be a parameter like self.shape above
         
-        print(datetime.now(), '[xy_tracking] FOV size = {}'.format(self.shape))
+        print(datetime.now(), '[xy_tracking] FOV size = {}'.format(self.andor.get_roi()))
 
         # Temperature
 
@@ -515,7 +515,7 @@ class Backend(QtCore.QObject):
         # Frame transfer mode
         
         self.andor.enable_frame_transfer_mode(True)
-        print(datetime.now(), '[xy_tracking] Frame transfer mode =', self.andor.enable_frame_transfer_mode)
+        print(datetime.now(), 'Frame transfer mode =', self.andor.enable_frame_transfer_mode())
         #OLD
         # # Horizontal readout speed
 
@@ -557,8 +557,10 @@ class Backend(QtCore.QObject):
             
     def initialize_camera(self):
         
-        self.andor.open()
-        print("Andor is opened?", andor.is_opened())
+        #self.andor.open() #Creo que esto no es necesario porque open se ejecuta cuando de inicializa el contructor
+        print("Is Andor opened?", andor.is_opened())
+        print(datetime.now(),'Device info:', andor.get_device_info())
+
 
     @pyqtSlot(int, bool)
     def toggle_tracking_shutter(self, num, val):
@@ -596,27 +598,23 @@ class Backend(QtCore.QObject):
         
         self.initial = True
         
-        print("Andor temperature:", andor.get_temperature())
-        print("Andor temperature: status", andor.get_temperature_status())
+        print("Andor current temperature: ", andor.get_temperature())
+        print("Andor temperature status: ", andor.get_temperature_status())
         
         # Initial image
         
         self.andor.set_acquisition_mode('cont')
-        print(datetime.now(), '[xy_tracking] Acquisition mode:', self.andor.get_acquisition_mode())
-        self.andor.setup_shutter("open",ttl_mode=1)
+        print(datetime.now(), 'Acquisition mode:', self.andor.get_acquisition_mode())
+        # self.andor.setup_shutter("open",ttl_mode=1) #No need to use shutter
         self.andor.start_acquisition()
         
-        time.sleep(self.expTime * 2)
-        #Si esto funciona ponerlo en una funcion  
-        size = np.array(self.shape).prod()
-        arr = np.ascontiguousarray(np.zeros(size, dtype=np.int32))
-        self.andor.lib.GetMostRecentImage(arr.ctypes.data_as(ct.POINTER(ct.c_int32)),
-                                    ct.c_ulong(size))
-        self.image = arr.reshape(self.shape)
+        time.sleep(self.expTime * 2) #Capaz tenga que sacar esta linea
+        self.andor.wait_for_frame() 
+        self.image = self.andor.read_oldest_image()
 
         self.changedImage.emit(self.image)
 
-        self.viewtimer.start(400) # DON'T USE time.sleep() inside the update()
+        self.viewtimer.start(200) # DON'T USE time.sleep() inside the update()
                                   # 400 ms ~ acq time + gaussian fit time
     
     def liveview_stop(self):
@@ -655,7 +653,7 @@ class Backend(QtCore.QObject):
     def update_view(self):
         """ Image update while in Liveview mode """
 
-        self.image = self.andor.most_recent_image16(self.shape)
+        self.image = self.andor.read_oldest_image()
         self.changedImage.emit(self.image)
             
     def update_graph_data(self):
@@ -983,7 +981,7 @@ class Backend(QtCore.QObject):
             
         time.sleep(self.expTime * 3)
 
-        self.image = self.andor.most_recent_image16(self.shape)
+        self.image = self.andor.read_oldest_image()
         self.changedImage.emit(self.image)
             
         self.andor.stop_acquisition()
@@ -1279,12 +1277,11 @@ class Backend(QtCore.QObject):
         
         if self.camON:
             self.andor.stop_acquisition()
+            print('Andor acquisition status: ',andor.get_status(), ". Idle: no acquisition")
 
-        self.andor.setup_shutter("closed",ttl_mode=0)
-        self.andor.set_cooler(False)
-        self.andor.lib.FreeInternalMemory()
-        self.andor.lib.ShutDown()
-        print(datetime.now(), '[xy_tracking] Andor camera shut down')
+        # self.andor.setup_shutter("closed",ttl_mode=0) #No need to modify shutter state
+        self.andor.close()
+        print(datetime.now(),"Is Andor opened? ", andor.is_opened())
         
         # Go back to 0 position
 
@@ -1307,7 +1304,7 @@ if __name__ == '__main__':
     #app.setStyle(QtGui.QStyleFactory.create('fusion'))
     app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
     
-    andor = Andor.AndorSDK2Camera()
+    andor = Andor.AndorSDK2Camera(fan_mode = "full")
     
     DEVICENUMBER = 0x1
     adw = ADwin.ADwin(DEVICENUMBER, 1)
