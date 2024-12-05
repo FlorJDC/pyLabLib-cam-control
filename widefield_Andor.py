@@ -17,6 +17,8 @@ from pyqtgraph.dockarea import Dock, DockArea
 import pyqtgraph.ptime as ptime
 from scipy import optimize as opt
 from PIL import Image
+import tifffile
+import os
 
 import tools.viewbox_tools as viewbox_tools
 import tools.colormaps as cmaps
@@ -28,18 +30,21 @@ from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QThread
 from PyQt5.QtWidgets import QGroupBox
 import qdarkstyle
 
-from pylablib.devices import Andor
+#from pylablib.devices import Andor
+from pylablib.devices.Andor import AndorSDK2
 import drivers.ADwin as ADwin
 
 DEBUG = True
 
-PX_SIZE = 80.0 #px size of camera in nm
+PX_SIZE = 133.0 #px size of camera in nm
 
 class Frontend(QtGui.QFrame):
     
     roiInfoSignal = pyqtSignal(int, np.ndarray)
     closeSignal = pyqtSignal()
     saveDataSignal = pyqtSignal(bool)
+    saveImageSignal = pyqtSignal()
+    startRecordingSignal = pyqtSignal(float)
     """
     Signals
              
@@ -120,6 +125,30 @@ class Frontend(QtGui.QFrame):
         self.img.setImage(img, autoLevels=False)
         self.xaxis.setScale(scale=PX_SIZE/1000) #scale to µm
         self.yaxis.setScale(scale=PX_SIZE/1000) #scale to µm
+        
+    def on_save_button_clicked(self):
+        self.saveImageSignal.emit()
+        
+    def emit_start_recording_signal(self):
+        """Envía la señal para iniciar la grabación."""
+        try:
+            duration = float(self.durationEdit.text())
+            self.startRecordingSignal.emit(duration)
+            self.progressBar.setValue(0)  # Reinicia la barra de progreso
+            self.progressBar.setVisible(True) 
+        except ValueError:
+            print("Por favor, ingresa un número válido para la duración.")
+    
+    @pyqtSlot(int)
+    def update_progress(self, progress):
+        """
+        Actualiza la barra de progreso según el tiempo transcurrido de la grabación.
+        """
+        if progress is not None:
+            self.progressBar.setValue(progress)
+        if progress == 100:
+            self.progressBar.setValue(100)
+            print("Grabación finalizada.")
 
     @pyqtSlot(int, bool)    
     def update_shutter(self, num, on):
@@ -150,102 +179,239 @@ class Frontend(QtGui.QFrame):
         backend.updateGUIcheckboxSignal.connect(self.get_backend_states)
         backend.shuttermodeSignal.connect(self.update_shutter)
         backend.liveviewSignal.connect(self.toggle_liveview)
+        backend.progressBarSignal.connect(self.update_progress)
         
     def setup_gui(self):
         # GUI layout
         grid = QtGui.QGridLayout()
         self.setLayout(grid)
-        
-        # parameters widget
-        self.paramWidget = QGroupBox('Parameters')   
-        self.paramWidget.setFixedHeight(260)
-        self.paramWidget.setFixedWidth(250)
-        grid.addWidget(self.paramWidget, 0, 1)
-        
-        # image widget layout
+    
+        # Image widget layout
         imageWidget = pg.GraphicsLayoutWidget()
         imageWidget.setMinimumHeight(350)
         imageWidget.setMinimumWidth(350)
-        
-        # setup axis, for scaling see get_image()
+    
+        # Setup axis for scaling
         self.xaxis = pg.AxisItem(orientation='bottom', maxTickLength=5)
         self.xaxis.showLabel(show=True)
         self.xaxis.setLabel('x', units='µm')
-        
+    
         self.yaxis = pg.AxisItem(orientation='left', maxTickLength=5)
         self.yaxis.showLabel(show=True)
         self.yaxis.setLabel('y', units='µm')
-        
+    
         self.vb = imageWidget.addPlot(axisItems={'bottom': self.xaxis, 
                                                  'left': self.yaxis})
-    
         self.vb.setAspectLocked(True)
         self.img = pg.ImageItem()
         self.img.translate(-0.5, -0.5)
         self.vb.addItem(self.img)
-        self.vb.setAspectLocked(True)
         imageWidget.setAspectLocked(True)
-        grid.addWidget(imageWidget, 0, 0)
-        
-        # set up histogram for the liveview image
+    
+        gridItem = pg.GridItem()
+        self.vb.addItem(gridItem)
+        grid.addWidget(imageWidget, 0, 0, 2, 1)  # Spanning two rows
+    
+        # Set up histogram for the liveview image
         self.hist = pg.HistogramLUTItem(image=self.img)
-        lut = viewbox_tools.generatePgColormap(cmaps.parula)
-        self.hist.gradient.setColorMap(lut)
-#        self.hist.vb.setLimits(yMin=800, yMax=3000)
-
-        ## TO DO: fix histogram range
+        self.hist.gradient.loadPreset('magma')
+        self.hist.vb.setLimits(yMin=0, yMax=5000)
         for tick in self.hist.gradient.ticks:
             tick.hide()
         imageWidget.addItem(self.hist, row=0, col=1)
-        
-        # LiveView Button
+    
+        # Parameters widget
+        self.paramWidget = QGroupBox('Parameters')
+        self.paramWidget.setFixedHeight(260)
+        self.paramWidget.setFixedWidth(250)
+    
+        param_layout = QtGui.QGridLayout()
+        self.paramWidget.setLayout(param_layout)
+    
+        # Populate paramWidget
         self.liveviewButton = QtGui.QPushButton('Camera LIVEVIEW')
         self.liveviewButton.setCheckable(True)
-        
-        # create ROI button
+    
         self.ROIButton = QtGui.QPushButton('ROI')
         self.ROIButton.setCheckable(True)
         self.ROIButton.clicked.connect(self.create_roi)
-        
-        # select ROI
+    
         self.selectROIbutton = QtGui.QPushButton('Select ROI')
         self.selectROIbutton.clicked.connect(self.emit_roi_info)
-        
-        # delete ROI button
-        self.delete_roiButton = QtGui.QPushButton('delete ROIs')
+    
+        self.delete_roiButton = QtGui.QPushButton('Delete ROIs')
         self.delete_roiButton.clicked.connect(self.delete_roi)
-        
-        # position tracking checkbox
-        self.exportDataButton = QtGui.QPushButton('export current data')
-
-        # select area checkbox
+    
+        self.saveFrameButton = QtGui.QPushButton('Save Frame')
+        self.saveFrameButton.clicked.connect(self.on_save_button_clicked)
+    
         self.selectAreaBox = QtGui.QCheckBox('Select Area to APD')
         self.selectAreaBox.stateChanged.connect(self.emit_roi_info)
-
-        # save data signal
+    
         self.saveDataBox = QtGui.QCheckBox("Save data")
         self.saveDataBox.stateChanged.connect(self.emit_save_data_state)
-        
-        #shutter button and label
+    
         self.shutterLabel = QtGui.QLabel('Shutter open?')
         self.shutterCheckbox = QtGui.QCheckBox('MinilasEvo 640')
-
-        # buttons and param layout
-        subgrid = QtGui.QGridLayout()
-        self.paramWidget.setLayout(subgrid)
-
-        subgrid.addWidget(self.liveviewButton, 0, 0)
-        subgrid.addWidget(self.ROIButton, 1, 0)
-        subgrid.addWidget(self.selectROIbutton, 2, 0)
-        subgrid.addWidget(self.delete_roiButton, 3, 0)
-        subgrid.addWidget(self.exportDataButton, 4, 0)
-        subgrid.addWidget(self.selectAreaBox, 1, 1)
-        subgrid.addWidget(self.saveDataBox, 2, 1)
-        subgrid.addWidget(self.shutterLabel, 7, 0)
-        subgrid.addWidget(self.shutterCheckbox, 7, 1)
-        
+    
+        param_layout.addWidget(self.liveviewButton, 0, 0)
+        param_layout.addWidget(self.ROIButton, 1, 0)
+        param_layout.addWidget(self.selectROIbutton, 2, 0)
+        param_layout.addWidget(self.delete_roiButton, 3, 0)
+        param_layout.addWidget(self.saveFrameButton, 4, 0)
+        param_layout.addWidget(self.selectAreaBox, 1, 1)
+        param_layout.addWidget(self.saveDataBox, 2, 1)
+        param_layout.addWidget(self.shutterLabel, 7, 0)
+        param_layout.addWidget(self.shutterCheckbox, 7, 1)
+    
+        # Video acquisition widget
+        self.videoWidget = QGroupBox('Video Acquisition Settings')
+    
+        video_layout = QtGui.QGridLayout()
+        self.videoWidget.setLayout(video_layout)
+    
+        self.durationLabel = QtGui.QLabel('Time [min]')
+        self.durationEdit = QtGui.QLineEdit('1')
+        self.startVideoButton = QtGui.QPushButton('Start Video')
+        self.startVideoButton.setCheckable(True)
+        self.startVideoButton.clicked.connect(self.emit_start_recording_signal)
+    
+        self.progressBar = QtGui.QProgressBar(self)
+        self.progressBar.setRange(0, 100)  # range: (0-100%)
+        self.progressBar.setValue(0)
+    
+        video_layout.addWidget(self.durationLabel, 0, 0)
+        video_layout.addWidget(self.durationEdit, 0, 1)
+        video_layout.addWidget(self.startVideoButton, 1, 0)
+        video_layout.addWidget(self.progressBar, 1, 1)
+    
+        # Container widget for paramWidget and videoWidget
+        side_widget = QtGui.QWidget()
+        side_layout = QtGui.QVBoxLayout(side_widget)
+        side_layout.addWidget(self.paramWidget)
+        side_layout.addWidget(self.videoWidget)
+    
+        # Add side_widget to grid
+        grid.addWidget(side_widget, 0, 1, 2, 1)  # Spanning two rows
         self.liveviewButton.clicked.connect(lambda: self.toggle_liveview(self.liveviewButton.isChecked()))
+
         
+    # def setup_gui(self):
+    #     # GUI layout
+    #     grid = QtGui.QGridLayout()
+    #     self.setLayout(grid)
+        
+    #     # parameters widget
+    #     self.paramWidget = QGroupBox('Parameters')   
+    #     self.paramWidget.setFixedHeight(260)
+    #     self.paramWidget.setFixedWidth(250)
+    #     grid.addWidget(self.paramWidget, 0, 1)
+        
+    #     # image widget layout
+    #     imageWidget = pg.GraphicsLayoutWidget()
+    #     imageWidget.setMinimumHeight(350)
+    #     imageWidget.setMinimumWidth(350)
+        
+    #     # setup axis, for scaling see get_image()
+    #     self.xaxis = pg.AxisItem(orientation='bottom', maxTickLength=5)
+    #     self.xaxis.showLabel(show=True)
+    #     self.xaxis.setLabel('x', units='µm')
+        
+    #     self.yaxis = pg.AxisItem(orientation='left', maxTickLength=5)
+    #     self.yaxis.showLabel(show=True)
+    #     self.yaxis.setLabel('y', units='µm')
+        
+    #     self.vb = imageWidget.addPlot(axisItems={'bottom': self.xaxis, 
+    #                                              'left': self.yaxis})
+    
+    #     self.vb.setAspectLocked(True)
+    #     self.img = pg.ImageItem()
+    #     self.img.translate(-0.5, -0.5)
+    #     self.vb.addItem(self.img)
+    #     imageWidget.setAspectLocked(True)
+        
+    #     gridItem = pg.GridItem()
+    #     self.vb.addItem(gridItem)
+    #     grid.addWidget(imageWidget, 0, 0)
+        
+    #     # set up histogram for the liveview image
+    #     self.hist = pg.HistogramLUTItem(image=self.img)
+    #     self.hist.gradient.loadPreset('magma')
+    #     self.hist.vb.setLimits(yMin=0, yMax=5000)
+    #     for tick in self.hist.gradient.ticks:
+    #         tick.hide()
+    #     imageWidget.addItem(self.hist, row=0, col=1)
+        
+    #     ##To paramWidget
+    #     # LiveView Button
+    #     self.liveviewButton = QtGui.QPushButton('Camera LIVEVIEW')
+    #     self.liveviewButton.setCheckable(True)
+        
+    #     # create ROI button
+    #     self.ROIButton = QtGui.QPushButton('ROI')
+    #     self.ROIButton.setCheckable(True)
+    #     self.ROIButton.clicked.connect(self.create_roi)
+        
+    #     # select ROI
+    #     self.selectROIbutton = QtGui.QPushButton('Select ROI')
+    #     self.selectROIbutton.clicked.connect(self.emit_roi_info)
+        
+    #     # delete ROI button
+    #     self.delete_roiButton = QtGui.QPushButton('Delete ROIs')
+    #     self.delete_roiButton.clicked.connect(self.delete_roi)
+        
+    #     # save current frame
+    #     self.saveFrameButton = QtGui.QPushButton('Save Frame')
+    #     self.saveFrameButton.clicked.connect(self.on_save_button_clicked)
+    #     # select area checkbox
+    #     self.selectAreaBox = QtGui.QCheckBox('Select Area to APD')
+    #     self.selectAreaBox.stateChanged.connect(self.emit_roi_info)
+
+    #     # save data signal
+    #     self.saveDataBox = QtGui.QCheckBox("Save data")
+    #     self.saveDataBox.stateChanged.connect(self.emit_save_data_state)
+        
+    #     #shutter button and label
+    #     self.shutterLabel = QtGui.QLabel('Shutter open?')
+    #     self.shutterCheckbox = QtGui.QCheckBox('MinilasEvo 640')
+
+    #     # buttons and param layout
+    #     subgrid = QtGui.QGridLayout()
+    #     self.paramWidget.setLayout(subgrid)
+
+    #     subgrid.addWidget(self.liveviewButton, 0, 0)
+    #     subgrid.addWidget(self.ROIButton, 1, 0)
+    #     subgrid.addWidget(self.selectROIbutton, 2, 0)
+    #     subgrid.addWidget(self.delete_roiButton, 3, 0)
+    #     subgrid.addWidget(self.saveFrameButton, 4, 0)
+    #     subgrid.addWidget(self.selectAreaBox, 1, 1)
+    #     subgrid.addWidget(self.saveDataBox, 2, 1)
+    #     subgrid.addWidget(self.shutterLabel, 7, 0)
+    #     subgrid.addWidget(self.shutterCheckbox, 7, 1)
+        
+    #     ## To videoWidget
+    #     self.videoWidget = QGroupBox('Video Acquisition Settings')
+    #     self.durationLabel = QtGui.QLabel('Time [min]')
+    #     self.durationEdit = QtGui.QLineEdit('1')
+    #     self.startVideoButton = QtGui.QPushButton('Start Video')
+    #     self.startVideoButton.setCheckable(True)
+    #     self.startVideoButton.clicked.connect(self.emit_start_recording_signal)
+        
+    #     self.progressBar = QtGui.QProgressBar(self)
+    #     self.progressBar.setRange(0, 100)  # range: (0-100%)
+    #     self.progressBar.setValue(0)
+    #     subgrid = QtGui.QGridLayout()
+    #     self.videoWidget.setLayout(subgrid)
+        
+    #     subgrid.addWidget(self.durationLabel, 0, 0)
+    #     subgrid.addWidget(self.durationEdit, 0, 1)
+    #     subgrid.addWidget(self.startVideoButton, 1, 0)
+    #     subgrid.addWidget(self.progressBar, 1, 1)
+    #     grid.addWidget(self.videoWidget, 1, 0)
+        
+
+    #     self.liveviewButton.clicked.connect(lambda: self.toggle_liveview(self.liveviewButton.isChecked()))
+            
     def closeEvent(self, *args, **kwargs):
         self.closeSignal.emit()
         super().closeEvent(*args, **kwargs)
@@ -257,6 +423,7 @@ class Backend(QtCore.QObject):
     updateGUIcheckboxSignal = pyqtSignal(bool)
     shuttermodeSignal = pyqtSignal(int, bool)
     liveviewSignal = pyqtSignal(bool)
+    progressBarSignal = pyqtSignal(int)
     """
     Signals
     
@@ -283,18 +450,22 @@ class Backend(QtCore.QObject):
         root = r'C:\\Data\\'
         folder = root + today
         
-        filename = r'\xydata'
+        filename = r'\widefield'
         self.filename = folder + filename
         
         self.viewtimer = QtCore.QTimer()
-        self.viewtimer.timeout.connect(self.update)
+        self.viewtimer.timeout.connect(self.update_view)
         
         self.save_data_state = False
         self.camON = False
+        self.image = None
+        self.is_recording = False
+        self.frames = []
+        self.recording_start_time = None
+        self.video_duration = 0 
         
-    def setup_camera(self):
+    def setup_camera(self): #TODO: Check if it is necesary to move this to another module
         
-        #self.pxSize = 80  # in nm #moved infront of Frontend to allow access
         self.shape = (512, 512) # TO DO: change to 256 x 256
         self.expTime = 0.050   # in sec
         
@@ -316,23 +487,23 @@ class Backend(QtCore.QObject):
         hsspeed = 1 # hsspeed_MHz = 5.0 (horizontal scan frequency corresponding to the given hsspeed index)
         preamp = 1 # preamp_gain=2.4000000953674316 #OJO: antes se usaba 4.7, con indice 2, chequear cómo se ve la imagen con un mayor preamp, puedo usar preamp = 2 y el cambio está en preamp_gain=5.099999904632568
     
-        andor.set_amp_mode(channel, oamp, hsspeed, preamp)
-        print("Current Amp mode: ", andor.get_amp_mode())
+        self.andor.set_amp_mode(channel, oamp, hsspeed, preamp)
+        print("Current Amp mode: ", self.andor.get_amp_mode())
         
         # EM GAIN
         EM_gain = 1  # EM gain set to 100
-        andor.set_EMCCD_gain(EM_gain) #Check I'm not sure about units (indexes???)
-        print(datetime.now(), 'EM gain: ', andor.get_EMCCD_gain())
+        self.andor.set_EMCCD_gain(EM_gain) #Check I'm not sure about units (indexes???)
+        print(datetime.now(), 'EM gain: ', self.andor.get_EMCCD_gain())
         
         # Vertical shift speed
         vert_shift_speed = 4 #µs
-        andor.set_vsspeed(vert_shift_speed)
-        print(datetime.now(), 'Current Vertical shift speed [µs]: ', andor.get_vsspeed())
+        self.andor.set_vsspeed(vert_shift_speed)
+        print(datetime.now(), 'Current Vertical shift speed [µs]: ', self.andor.get_vsspeed())
             
     def initialize_camera(self):
         #self.andor.open() #Creo que esto no es necesario porque open se ejecuta cuando de inicializa el contructor
-        print("Is Andor opened?", andor.is_opened())
-        print(datetime.now(),'Device info:', andor.get_device_info())
+        print("Is Andor opened?", self.andor.is_opened())
+        print(datetime.now(),'Device info:', self.andor.get_device_info())
 
     @pyqtSlot(int, bool)
     def toggle_tracking_shutter(self, num, val):
@@ -365,8 +536,8 @@ class Backend(QtCore.QObject):
         
     def liveview_start(self):
         self.initial = True
-        print("Andor current temperature: ", andor.get_temperature())
-        print("Andor temperature status: ", andor.get_temperature_status())
+        print("Andor current temperature: ", self.andor.get_temperature())
+        print("Andor temperature status: ", self.andor.get_temperature_status())
         
         # Initial image
         self.andor.set_acquisition_mode('cont')
@@ -385,15 +556,69 @@ class Backend(QtCore.QObject):
         self.viewtimer.stop()
         self.andor.stop_acquisition()
                     
-    def update(self):
-        """ General update method """ 
-        self.update_view() #Eliminar esto y conectar el timer con update_view()
-
     def update_view(self):
         """ Image update while in Liveview mode """
         self.andor.wait_for_frame() 
         self.image = self.andor.read_newest_image()
         self.changedImage.emit(self.image)
+        if self.is_recording:
+            elapsed_time = time.time() - self.recording_start_time
+            progress = int((elapsed_time / self.video_duration) * 100) #This is to update progress bar in front
+            self.frames.append(self.image) 
+            if elapsed_time >= self.video_duration:
+                self.stop_recording()
+            self.progressBarSignal.emit(progress)
+        return None
+    def start_recording(self, duration):
+        """
+        Inicia la grabación del video por la duración especificada.
+        """
+        if not self.is_recording:
+            self.is_recording = True
+            self.video_duration = duration*60 # min
+            self.recording_start_time = time.time()
+            self.frames = []
+            print(f"Grabación iniciada por {duration} minutos.")
+        else:
+            print("Ya hay una grabación en curso.")
+
+    def stop_recording(self):
+        """
+        Detiene la grabación y guarda el video.
+        """
+        if self.is_recording:
+            self.is_recording = False
+            self.save_video()
+            print("Grabación finalizada.")
+
+    def save_video(self):
+        """
+        Guarda los frames capturados como un stack TIFF.
+        """
+        if not self.frames:
+            print("No se capturaron frames para guardar.")
+            return
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"_video_{timestamp}.tiff"
+        tiff_filename = self.filename + filename
+        tifffile.imsave(tiff_filename, self.frames) 
+        print(f"Video guardado como {tiff_filename}")
+
+    def save_current_frame(self):
+        """Guarda la imagen actual en formatos .npy y .tiff."""
+        filename = self.filename + '_frame'
+        suffix = 1
+        while os.path.exists(f"{filename}_{suffix}.npy") or os.path.exists(f"{filename}_{suffix}.tiff"):
+            suffix += 1
+        
+        filename = f"{filename}_{suffix}"
+        if self.image is not None:
+            np.save(filename, self.image)
+            Image.fromarray(self.image).save(f"{filename}.tiff")
+            print(f"Imagen guardada en {filename}.tiff y {filename}.npy")
+        else:
+            print("No hay imagen disponible para guardar.")
         
     def set_actuator_param(self, pixeltime=1000):
         self.adw.Set_FPar(46, tools.timeToADwin(pixeltime))
@@ -477,13 +702,14 @@ class Backend(QtCore.QObject):
         '''
         self.ROIcoordinates = coordinates_array.astype(int)
         if DEBUG:
-            print(datetime.now(), '[xy_tracking] got ROI coordinates')
+            print(datetime.now(), '[Andor Widefield] got ROI coordinates')
             
     def make_connection(self, frontend):
         frontend.roiInfoSignal.connect(self.get_roi_info)
         frontend.closeSignal.connect(self.stop)
         frontend.saveDataSignal.connect(self.get_save_data_state)
-        frontend.exportDataButton.clicked.connect(self.export_data)
+        frontend.saveImageSignal.connect(self.save_current_frame)
+        frontend.startRecordingSignal.connect(self.start_recording)
         frontend.liveviewButton.clicked.connect(self.liveview)
         
     @pyqtSlot()    
@@ -491,10 +717,10 @@ class Backend(QtCore.QObject):
         self.viewtimer.stop()
         if self.camON:
             self.andor.stop_acquisition()
-            print('Andor acquisition status: ',andor.get_status(), ". Idle: no acquisition")
+            print('Andor acquisition status: ', self.andor.get_status(), ". Idle: no acquisition")
         # self.andor.setup_shutter("closed",ttl_mode=0) #No need to modify shutter state
         self.andor.close()
-        print(datetime.now(),"Is Andor opened? ", andor.is_opened())
+        print(datetime.now(),"Is Andor opened? ", self.andor.is_opened())
         
         # Go back to 0 position
         x_0 = 0
@@ -512,8 +738,8 @@ if __name__ == '__main__':
         
     #app.setStyle(QtGui.QStyleFactory.create('fusion'))
     app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
-    
-    andor = Andor.AndorSDK2Camera(fan_mode = "full")
+    andor = AndorSDK2.AndorSDK2Camera(fan_mode = "full") #Forma antigua
+    #andor = Andor.AndorSDK2Camera(fan_mode = "full")
     
     DEVICENUMBER = 0x1
     adw = ADwin.ADwin(DEVICENUMBER, 1)

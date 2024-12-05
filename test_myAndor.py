@@ -11,7 +11,7 @@ ready: setup cam
 https://pylablib.readthedocs.io/en/stable/devices/cameras_basics.html#cameras-basics
 """
 from datetime import datetime
-from pylablib.devices import Andor
+from pylablib.devices.Andor import AndorSDK2
 import numpy as np
 import ctypes as ct
 import time
@@ -64,12 +64,12 @@ def open_shutter(andor,ttl_mode=0):
              
 
 #Forma Larga de hacer lo mismo, sin tener en cuenta el __init__.py
-# if __name__=="__main__":
-#     AndorSDK2.restart_lib()
-#     print(AndorSDK2.get_cameras_number())
-#     camera = AndorSDK2.AndorSDK2Camera()
-#     print(camera.get_device_info())
-
+if __name__=="__main__":
+    AndorSDK2.restart_lib()
+    print(AndorSDK2.get_cameras_number())
+    camera = AndorSDK2.AndorSDK2Camera()
+    print(camera.get_device_info())
+#%%
 if __name__=="__main__":
     Andor.AndorSDK2.restart_lib() #restart_lib is not imported in __init__.py
     # print(Andor.get_cameras_number_SDK2()) #This is because of the __init__.py script of Andor file
